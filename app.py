@@ -1,4 +1,5 @@
-# ui.py
+# app.py 
+# Import python libraries:
 import streamlit as st
 import numpy as np
 import plotly.graph_objects as go
@@ -7,48 +8,73 @@ import os
 import pandas as pd
 import plotly.express as px
 from scipy.stats import norm
+from ultralytics import YOLO
 
 st.set_page_config(page_title="GeoPPE Sentinel Dashboard", 
                    page_icon="🛡️", 
                    layout="wide"
                 )
 
+
+# Load trained YOLOv8 model
+model = YOLO("model/best.pt")  # path to your .pt file
+
 API_URL = st.secrets.get("API_URL", os.getenv("API_URL", "https://fatigue-risk-api.onrender.com/predict"))
-
-# EXEC_PBI_EMBED = st.secrets.get("EXEC_PBI_EMBED", os.getenv("EXEC_PBI_EMBED", ""))     # Power BI embed URL
-# CCTV_PBI_EMBED = st.secrets.get("CCTV_PBI_EMBED", os.getenv("CCTV_PBI_EMBED", ""))     # Power BI embed URL
-# GEOF_PBI_EMBED = st.secrets.get("GEOF_PBI_EMBED", os.getenv("GEOF_PBI_EMBED", ""))     # Power BI embed URL
-
-# # Optional fallback "open in new tab" links (Power BI report links)
-# EXEC_PBI_LINK = st.secrets.get("EXEC_PBI_LINK", os.getenv("EXEC_PBI_LINK", ""))
-# CCTV_PBI_LINK = st.secrets.get("CCTV_PBI_LINK", os.getenv("CCTV_PBI_LINK", ""))
-# GEOF_PBI_LINK = st.secrets.get("GEOF_PBI_LINK", os.getenv("GEOF_PBI_LINK", ""))
 
 # -----------------------------
 # HELPERS
 # -----------------------------
-def embed_powerbi(embed_url: str, height: int = 820):
-    """Embeds a Power BI report using an iframe."""
-    if not embed_url:
-        st.warning("Power BI embed URL not set yet. Add it to secrets/env and reload.")
-        return
+# -----------------------------
+# PPE Compliance Evaluation
+# -----------------------------
 
-    iframe = f"""
-    <iframe
-        width="100%"
-        height="{height}"
-        src="{embed_url}"
-        frameborder="0"
-        allowFullScreen="true">
-    </iframe>
+REQUIRED_PPE = ["helmet", "vest"]
+CONF_THRESHOLD = 0.6
+
+
+def evaluate_ppe_compliance(detections):
     """
-    st.components.v1.html(iframe, height=height)
+    Evaluates PPE compliance based on model detections.
 
-def open_link_button(label: str, url: str):
-    if url:
-        st.link_button(label, url)
+    Parameters:
+    detections (list): List of dicts with keys 'class' and 'conf'
+
+    Returns:
+    status (str): 'Compliant' or 'Non-Compliant'
+    confidence (float): Aggregated confidence score
+    missing_ppe (list): List of missing PPE items
+    """
+
+    detected = {}
+
+    # Keep highest confidence per PPE item
+    for det in detections:
+        cls = det["class"].lower()
+        conf = det["conf"]
+
+        if cls not in detected or conf > detected[cls]:
+            detected[cls] = conf
+
+    missing_ppe = []
+    confidence_scores = []
+
+    for ppe in REQUIRED_PPE:
+        if ppe not in detected or detected[ppe] < CONF_THRESHOLD:
+            missing_ppe.append(ppe)
+        else:
+            confidence_scores.append(detected[ppe])
+
+    if missing_ppe:
+        status = "Non-Compliant"
     else:
-        st.caption("No external report link set.")
+        status = "Compliant"
+
+    overall_confidence = round(
+        sum(confidence_scores) / len(confidence_scores), 2
+    ) if confidence_scores else 0.0
+
+    return status, overall_confidence, missing_ppe
+
 
 @st.cache_data
 def load_population():
@@ -58,7 +84,7 @@ population_df = load_population()
 
 def call_fatigue_api(payload: dict) -> dict:
     """Calls your FastAPI fatigue endpoint."""
-    r = requests.post(API_URL, json=payload, timeout=20)
+    r = requests.post(API_URL, json=payload, timeout=10)
     # Raise useful error if non-200
     r.raise_for_status()
     return r.json()
@@ -67,12 +93,33 @@ def call_fatigue_api(payload: dict) -> dict:
 # HEADER
 # -----------------------------
 st.title("🛡️ GeoPPE Sentinel - Mine Safety Control Room")
-st.caption("Caption here")
+st.markdown("""
+**GeoPPE Sentinel** is an AI-powered mine safety monitoring proof of concept designed to 
+demonstrate how visual monitoring and spatial awareness can be combined to support safer 
+operations in mining environments.
+
+The system simulates a **centralised safety control room** by bringing together:
+- **Executive-level dashboards** to support informed decision-making 
+- **CCTV monitoring** to assess PPE compliance  
+- **Location-based risk awareness** using geofencing concepts  
+- **Fatigue Risk** to assess a worker's fatigue 
+
+This project focuses on **practical safety insights**, showing how visual observations 
+can be converted into clear safety outcomes rather than technical model outputs.
+
+""")
+
+
 
 # TABS
+# Executive, CCTV, and Geo-Fence dashboards
+# Power BI dashboards were developed in Power BI Desktop.
+# Deployment to Power BI Service requires an organisational Microsoft account.
+# Due to tenant eligibility restrictions, enterprise-style Power BI screenshots
+# are used to demonstrate the proof of concept.
 executive_tab, cctv_tab, geo_fence_tab, fatigue_tab = st.tabs([
     "1) Exectuive Dashboard 📊",
-    "2) CCTV - OPF & PPE Dashboard 🎥",
+    "2) CCTV – PPE Monitoring 🎥",
     "3) GeoFence Map - Spatial Risk View 🗺️",
     "4) Fatigue Risk Predictor 🔮"
 ])
@@ -81,58 +128,155 @@ executive_tab, cctv_tab, geo_fence_tab, fatigue_tab = st.tabs([
 # TAB 1: EXECUTIVE
 # -----------------------------
 with executive_tab:
-    st.subheader("Executive Dashboard 📊")
-    colA, colB = st.columns([3,1], vertical_alignment="top")
+    st.subheader("1️⃣ Executive Dashboard 📊")
 
-    with colB:
-        st.markdown("### Report access")
-        # open_link_button("Open Executive Report", EXEC_PBI_LINK)
-        st.markdown("---")
-        st.caption("Tip: use the embed URL for in-app viewing, and the report link for opening in a new tab.")
-
-    with colA:
-        st.caption("colA - Executive")
-        # embed_powerbi(EXEC_PBI_EMBED, height=850)
+    st.markdown(
+    "View a high-level summary of safety performance, including PPE compliance trends and key risk indicators," \
+    "designed for supervisors and operational leaders.")
+    st.image("data/executive.png", caption="")
 
 # -----------------------------
 # TAB 2: CCTV
 # -----------------------------
 with cctv_tab:
-    st.subheader("CCTV - OPF & PPE Dashboard 🎥")
-    colA, colB = st.columns([3,1], vertical_alignment="top")
+    st.subheader("2️⃣ **CCTV – PPE Monitoring 🎥**")
 
-    with colB:
-        st.markdown("### Report access")
-        # open_link_button("Open Executive Report", EXEC_PBI_LINK)
-        st.markdown("---")
-        st.caption("Tip: use the embed URL for in-app viewing, and the report link for opening in a new tab.")
+    st.markdown("""
+    Review example CCTV scenarios that demonstrate:
 
-    with colA:
-        st.caption("colA - CCTV")
-        # embed_powerbi(EXEC_PBI_EMBED, height=850)
+    - Workers meeting PPE requirements  
+    - Instances of PPE non-compliance  
+    - Clear safety outcomes with confidence indicators  
 
+    You may also upload a CCTV image to see how the system assesses PPE compliance.
+    """)
+
+
+    tab1, tab2, tab3 = st.tabs([
+        "✅ Compliant",
+        "❌ Non-Compliant",
+        "🧪 Test Your Own"
+    ])
+
+    with tab1:
+        st.markdown("### Example: PPE Compliant Worker ✅")
+
+                
+        col1, col2 = st.columns([3, 2])
+
+        with col1:
+            st.video("YOLO_Videoes/YOLO_videoes_sample_results/ppe_demo_output_h264.mp4")
+
+        with col2:
+            detections = [
+                {"class": "helmet", "conf": 0.93},
+                {"class": "vest", "conf": 0.89}
+            ]
+
+            # Evaluate compliance
+            status, confidence, missing = evaluate_ppe_compliance(detections)
+
+            # Display AI output
+            st.markdown("#### Results Output:")
+
+            st.success(f"Status: {status}")
+            st.metric("Confidence Score", f"{confidence * 100:.1f}%")
+
+            if missing:
+                st.warning(f"Missing PPE: {', '.join(missing)}")
+    
+    with tab2:
+        st.markdown("### Example: PPE Non-Compliant Worker ❌")
+
+        col1, col2 = st.columns([3, 2])
+
+        # --- CCTV Video ---
+        with col1:
+            st.video(
+                "YOLO_Videoes/YOLO_videoes_sample_results/ppe_no_vest_demo_output_h264.mp4",
+                format="video/mp4"
+            )
+
+        with col2:
+            # Simulated YOLO detections (Vest missing)
+            detections = [
+                {"class": "helmet", "conf": 0.93}
+            ]
+
+            # Evaluate compliance
+            status, confidence, missing = evaluate_ppe_compliance(detections)
+
+            st.markdown("#### Results Output:")
+
+            st.error(f"Status: {status}")
+            st.metric("Confidence Score", f"{confidence * 100:.1f}%")
+
+
+    with tab3:
+        st.markdown("### Test Your Own CCTV Image/Video")
+
+        uploaded = st.file_uploader(
+            "Upload a CCTV image/video",
+            type=["jpg", "png", "mp4"]
+        )
+
+        # if uploaded:
+        #     st.image(uploaded, caption="Uploaded CCTV Frame")
+
+        #     # Example: run YOLO model here
+        #     detections = run_model_on_image(uploaded)
+
+        #     status, confidence, missing = evaluate_ppe_compliance(detections)
+
+        #     if status == "Compliant":
+        #         st.success(f"Status: {status}")
+        #     else:
+        #         st.error(f"Status: {status}")
+
+        #     st.metric("Confidence Score", f"{confidence*100:.1f}%")
+
+        #     if missing:
+        #         st.warning(f"Missing PPE: {', '.join(missing)}")
+
+    
+    
 # -----------------------------
 # TAB 3: GEOFENCE
 # -----------------------------
 with geo_fence_tab:
-    st.subheader("GeoFence Map - Spatial Risk View 🗺️")
-    colA, colB = st.columns([3,1], vertical_alignment="top")
+    st.subheader("3️⃣ GeoFence Map - Spatial Risk View 🗺️")
+    st.subheader("Rio Tinto – Marandoo Mine Site OPF")
+    st.markdown(
+    "📍[View location on Google Maps](https://www.google.com/maps/place/Marandoo+Mine+Site/@-22.6363653,118.1185468,927m/data=!3m1!1e3!4m6!3m5!1s0x2bf292a3a2ffb34b:0x2e6673fa666c0dce!8m2!3d-22.6367416!4d118.1218566!16s%2Fm%2F0dsd4xb?entry=ttu&g_ep=EgoyMDI1MTIwOS4wIKXMDSoASAFQAw%3D%3D)"
+    )
 
-    with colB:
-        st.markdown("### Report access")
-        # open_link_button("Open Executive Report", EXEC_PBI_LINK)
-        st.markdown("---")
-        st.caption("Tip: use the embed URL for in-app viewing, and the report link for opening in a new tab.")
+    st.markdown("""Explore a visual representation of the mine site showing operational zones and 
+                restricted areas. This view demonstrates how worker location can increase or reduce 
+                safety risk when combined with CCTV observations.
+                """)
 
-    with colA:
-        st.caption("colA - GeoFence")
-        # embed_powerbi(EXEC_PBI_EMBED, height=850)
+    st.markdown("""
+    **Purpose**  
+    This geospatial view represents a proof-of-concept geofencing risk layer for the Marandoo mine site. 
+    It provides spatial context to support operational safety, hazard awareness, and workforce monitoring.
+
+    **Note**  
+    This static map is used to demonstrate spatial risk logic due to enterprise platform and 
+    deployment limitations. In a production environment, this would be implemented as an 
+    interactive, real-time geospatial dashboard.
+    """)
+
+    st.image("data/geospatial.png", caption="")
+    
 
 # -----------------------------
 # TAB 4: FATIGUE PREDICTOR
 # -----------------------------
 with fatigue_tab:
-    st.subheader("Fatigue Risk Predictor 🔮")
+    st.subheader("4️⃣ Fatigue Risk Predictor 🔮")
+    st.markdown("""Use this section to assess potential worker fatigue risk based on reported or simulated 
+                shift and work pattern information. The tool provides a **simple risk classification** 
+                (e.g. low, medium, high) to support early intervention and workforce wellbeing planning.""")
     st.caption("Enter work conditions:")
 
     left, right = st.columns([1,1], vertical_alignment="top")
