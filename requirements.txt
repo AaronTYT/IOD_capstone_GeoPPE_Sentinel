@@ -1,2 +1,10 @@
 streamlit
-requests
+numpy
+pandas
+opencv-python-headless
+ultralytics
+torch
+torchvision
+plotly
+scikit-learn
+shapely
