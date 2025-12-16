@@ -9,6 +9,7 @@ import pandas as pd
 import plotly.express as px
 from scipy.stats import norm
 from ultralytics import YOLO
+import cv2
 
 st.set_page_config(page_title="GeoPPE Sentinel Dashboard", 
                    page_icon="🛡️", 
@@ -28,52 +29,157 @@ API_URL = st.secrets.get("API_URL", os.getenv("API_URL", "https://fatigue-risk-a
 # PPE Compliance Evaluation
 # -----------------------------
 
-REQUIRED_PPE = ["helmet", "vest"]
-CONF_THRESHOLD = 0.6
+REQUIRED_PPE = ["Safety Vest", "Hardhat"]
+NEGATIVE_PPE = [
+    "NO-Hardhat",
+    "NO-Safety Vest",
+    "NO-Goggles"
+]
 
+PPE_CONF_THRESHOLDS = {
+    "Hardhat": 0.35,
+    "Safety Vest": 0.30
+}
+
+
+def extract_detections(results):
+    detections = []
+
+    r = results[0]
+    if r.boxes is None:
+        return detections
+
+    for cls_id, conf in zip(r.boxes.cls, r.boxes.conf):
+        class_name = r.names[int(cls_id)]
+        detections.append({
+            "class": class_name,
+            "conf": float(conf)
+        })
+
+    return detections
 
 def evaluate_ppe_compliance(detections):
     """
-    Evaluates PPE compliance based on model detections.
-
-    Parameters:
-    detections (list): List of dicts with keys 'class' and 'conf'
-
+    Evaluate PPE compliance for a single frame.
     Returns:
-    status (str): 'Compliant' or 'Non-Compliant'
-    confidence (float): Aggregated confidence score
-    missing_ppe (list): List of missing PPE items
+        status (str): "Compliant" or "Non-Compliant"
+        confidence (float): supporting confidence score
+        issues (list): missing or violated PPE
     """
 
-    detected = {}
+    if not detections:
+        return "Non-Compliant", 0.0, ["No PPE detected"]
 
-    # Keep highest confidence per PPE item
-    for det in detections:
-        cls = det["class"].lower()
-        conf = det["conf"]
+    # Group detections by class and keep max confidence
+    class_conf = {}
+    for d in detections:
+        cls = d["class"]
+        conf = d["conf"]
+        class_conf[cls] = max(conf, class_conf.get(cls, 0.0))
 
-        if cls not in detected or conf > detected[cls]:
-            detected[cls] = conf
+    # 🚨 Rule 1: Explicit violations
+    violations = [cls for cls in NEGATIVE_PPE if cls in class_conf]
+    if violations:
+        return (
+            "Non-Compliant",
+            max(class_conf[v] for v in violations),
+            violations
+        )
 
-    missing_ppe = []
-    confidence_scores = []
-
+    # 🚨 Rule 2: Required PPE missing or too weak
+    missing_or_weak = []
     for ppe in REQUIRED_PPE:
-        if ppe not in detected or detected[ppe] < CONF_THRESHOLD:
-            missing_ppe.append(ppe)
-        else:
-            confidence_scores.append(detected[ppe])
+        if ppe not in class_conf:
+            missing_or_weak.append(f"{ppe} (missing)")
+        elif class_conf[ppe] < PPE_CONF_THRESHOLDS[ppe]:
+            missing_or_weak.append(
+                f"{ppe} (low conf {class_conf[ppe]:.2f})"
+            )
 
-    if missing_ppe:
-        status = "Non-Compliant"
+    if missing_or_weak:
+        avg_conf = sum(class_conf.values()) / len(class_conf)
+        return "Non-Compliant", avg_conf, missing_or_weak
+
+    # ✅ Fully compliant
+    avg_required_conf = (
+        sum(class_conf[ppe] for ppe in REQUIRED_PPE) / len(REQUIRED_PPE)
+    )
+
+    return "Compliant", avg_required_conf, []
+
+def extract_ppe_detections(results):
+    detections = []
+
+    for r in results:
+        if r.boxes is None:
+            continue
+
+        for cls_id, conf in zip(r.boxes.cls, r.boxes.conf):
+            class_name = r.names[int(cls_id)]
+            detections.append({
+                "class": class_name,
+                "conf": float(conf)
+            })
+
+    return detections
+
+
+def infer_frame(frame, model):
+    results = model(frame, conf=0.25, iou=0.45, verbose=False)
+    r = results[0]
+
+    if r.boxes is None:
+        return "Non-Compliant"  # conservative default
+
+    detections = [
+        {"class": r.names[int(cls)], "conf": float(conf)}
+        for cls, conf in zip(r.boxes.cls, r.boxes.conf)
+    ]
+
+    status, confidence, missing = evaluate_ppe_compliance(detections)
+    return status
+
+# It analyses every 15th frames
+def infer_video(video_path, model, frame_step=15):
+    cap = cv2.VideoCapture(video_path)
+
+    # fps = cap.get(cv2.CAP_PROP_FPS)
+    # frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    # duration = frame_count / fps
+
+    # print(f"FPS: {fps}")
+    # print(f"Total frames: {frame_count}")
+    # print(f"Duration (seconds): {duration:.2f}")
+
+    total_checked = 0
+    non_compliant = 0
+
+    frame_idx = 0
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        if frame_idx % frame_step == 0:
+            status = infer_frame(frame, model)
+            total_checked += 1
+            if "Non-Compliant" in status:
+                non_compliant += 1
+
+        frame_idx += 1
+
+    cap.release()
+    non_compliant_ratio = non_compliant / max(total_checked, 1)
+    
+    # If more than 20% of frames violate PPE rules → the entire video is unsafe.
+    if non_compliant_ratio > 0.2:
+        final_status = "Non-Compliant"
     else:
-        status = "Compliant"
+        final_status = "Compliant"
 
-    overall_confidence = round(
-        sum(confidence_scores) / len(confidence_scores), 2
-    ) if confidence_scores else 0.0
 
-    return status, overall_confidence, missing_ppe
+    return final_status, non_compliant_ratio
+
 
 
 @st.cache_data
@@ -152,92 +258,64 @@ with cctv_tab:
     """)
 
 
-    tab1, tab2, tab3 = st.tabs([
+    tab1, tab2 = st.tabs([
         "✅ Compliant",
-        "❌ Non-Compliant",
-        "🧪 Test Your Own"
+        "❌ Non-Compliant"
     ])
+    
 
     with tab1:
-        st.markdown("### Example: PPE Compliant Worker ✅")
-
-                
         col1, col2 = st.columns([3, 2])
 
         with col1:
             st.video("YOLO_Videoes/YOLO_videoes_sample_results/ppe_demo_output_h264.mp4")
 
         with col2:
-            detections = [
-                {"class": "helmet", "conf": 0.93},
-                {"class": "vest", "conf": 0.89}
-            ]
+            model = YOLO("model/best.pt")
 
-            # Evaluate compliance
-            status, confidence, missing = evaluate_ppe_compliance(detections)
+            video_path = "YOLO_Videoes/Original/mining.mp4"
+            
+            status, ratio = infer_video(video_path, model)
 
-            # Display AI output
-            st.markdown("#### Results Output:")
+            st.markdown("### 🎯 Video Compliance Result")
 
-            st.success(f"Status: {status}")
-            st.metric("Confidence Score", f"{confidence * 100:.1f}%")
+            print(status)
 
-            if missing:
-                st.warning(f"Missing PPE: {', '.join(missing)}")
-    
+            if "Non-Compliant" in status:
+                st.error(status)
+            else:
+                st.success(status)
+
+            st.metric("Compliant Frame Ratio", f"{ratio:.1%}")
+            st.markdown("""Although humans can clearly see that the workers are compliant with PPE standards, 
+                        the AI model is designed to be conservative.
+                        When PPE cannot be consistently detected with sufficient confidence across
+                        multiple frames—due to lighting, occlusion, or motion—the 
+                        system flags the footage as non-compliant to avoid providing false safety assurance""")
+
     with tab2:
         st.markdown("### Example: PPE Non-Compliant Worker ❌")
 
         col1, col2 = st.columns([3, 2])
 
-        # --- CCTV Video ---
         with col1:
-            st.video(
-                "YOLO_Videoes/YOLO_videoes_sample_results/ppe_no_vest_demo_output_h264.mp4",
-                format="video/mp4"
-            )
+            st.video("YOLO_Videoes/YOLO_videoes_sample_results/ppe_no_vest_demo_output_h264.mp4")
 
         with col2:
-            # Simulated YOLO detections (Vest missing)
-            detections = [
-                {"class": "helmet", "conf": 0.93}
-            ]
+            model = YOLO("model/best.pt")
 
-            # Evaluate compliance
-            status, confidence, missing = evaluate_ppe_compliance(detections)
+            video_path = "YOLO_Videoes/Original/no-vest-mining.mp4"
+            
+            status, ratio = infer_video(video_path, model)
 
-            st.markdown("#### Results Output:")
+            st.markdown("### 🎯 Video Compliance Result")
 
-            st.error(f"Status: {status}")
-            st.metric("Confidence Score", f"{confidence * 100:.1f}%")
+            if "Non-Compliant" in status:
+                st.error(status)
+            else:
+                st.success(status)
 
-
-    with tab3:
-        st.markdown("### Test Your Own CCTV Image/Video")
-
-        uploaded = st.file_uploader(
-            "Upload a CCTV image/video",
-            type=["jpg", "png", "mp4"]
-        )
-
-        # if uploaded:
-        #     st.image(uploaded, caption="Uploaded CCTV Frame")
-
-        #     # Example: run YOLO model here
-        #     detections = run_model_on_image(uploaded)
-
-        #     status, confidence, missing = evaluate_ppe_compliance(detections)
-
-        #     if status == "Compliant":
-        #         st.success(f"Status: {status}")
-        #     else:
-        #         st.error(f"Status: {status}")
-
-        #     st.metric("Confidence Score", f"{confidence*100:.1f}%")
-
-        #     if missing:
-        #         st.warning(f"Missing PPE: {', '.join(missing)}")
-
+            st.metric("Non-Compliant Frame Ratio", f"{ratio:.1%}")
     
     
 # -----------------------------
